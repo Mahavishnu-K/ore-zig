@@ -1,8 +1,6 @@
-// sys.zig - The ORE Systems SDK for Zig
-
 const std = @import("std");
 
-// RAW WEBASSEMBLY IMPORTS (Hidden from the developer)
+// RAW WEBASSEMBLY IMPORTS
 extern "env" fn ore_dlopen(filename_ptr: [*]const u8, filename_len: u32) i32;
 extern "env" fn ore_dlsym(handle: i32, symbol_ptr: [*]const u8, symbol_len: u32) i32;
 
@@ -15,19 +13,15 @@ pub const OreError = error{
 fn ToCAbiPtr(comptime T: type) type {
     const info = @typeInfo(T);
     
-    // If they already passed a pointer, assume they know what they are doing.
     if (info == .Pointer) return T;
     
-    // If they didn't pass a function, stop compilation instantly.
     if (info != .Fn) {
         @compileError("ORE Error: bind() requires a function type like `fn(i32, i32) i32`");
     }
 
-    // Extract the raw function signature, force it to be C-ABI, and rebuild it!
     var new_fn = info.Fn;
     new_fn.calling_convention = .c;
     
-    // Return a Constant Pointer to the newly forged C-ABI function
     return *const @Type(.{ .Fn = new_fn });
 }
 
@@ -35,7 +29,6 @@ fn ToCAbiPtr(comptime T: type) type {
 pub const Plugin = struct {
     handle: i32,
 
-    /// Elegant API to load a plugin from the ORE OS into physical RAM
     pub fn load(plugin_name: []const u8) OreError!Plugin {
         const handle = ore_dlopen(plugin_name.ptr, @as(u32, @intCast(plugin_name.len)));
         
@@ -46,7 +39,6 @@ pub const Plugin = struct {
         return Plugin{ .handle = handle };
     }
 
-    /// Comptime magic: Dynamically extracts the function and casts it to the exact type instantly!
     pub fn bind(self: Plugin, comptime FuncSig: type, symbol: []const u8) OreError!ToCAbiPtr(FuncSig) {
         const func_idx = ore_dlsym(self.handle, symbol.ptr, @as(u32, @intCast(symbol.len)));
         
@@ -56,7 +48,6 @@ pub const Plugin = struct {
 
         const FinalType = ToCAbiPtr(FuncSig);
 
-        // In WASM, C-function pointers are integer indices. We cast it to the requested signature.
         return @as(FinalType, @ptrFromInt(@as(usize, @intCast(func_idx))));
     }
 };

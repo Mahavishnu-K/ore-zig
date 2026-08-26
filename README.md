@@ -1,6 +1,6 @@
 # ORE Zig SDK (`ore-zig`)
 
-[![Zig Version](https://img.shields.io/badge/Zig-0.12.0+-orange.svg)](https://ziglang.org/)
+[![Zig Version](https://img.shields.io/badge/Zig-0.17.0+-orange.svg)](https://ziglang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Core Kernel](https://img.shields.io/badge/Core-ore--kernel-blue.svg)](https://github.com/Mahavishnu-K/ore-kernel)
 

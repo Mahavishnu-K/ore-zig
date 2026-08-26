@@ -14,7 +14,7 @@ It heavily leverages Zig's `comptime` features to provide an elegant, type-safe 
 
 - **Zero-Copy Overhead**: True memory fusion execution model.
 - **Dynamic Loading**: Dynamically load, link, and execute WebAssembly plugins at runtime using `ore_dlopen` and `ore_dlsym`.
-- **Secure & Type-safe Binding**: Bind plugin functions securely using native Zig syntax. The SDK automatically performs C-ABI pointer type transformation at compile time to ensure strict type safety.
+- **Secure & Type-safe Binding**: Bind plugin functions securely using native Zig syntax.
 
 ---
 
@@ -67,8 +67,8 @@ The SDK exports the `Plugin` struct and `OreError` for robust error handling whe
 #### `Plugin.load(plugin_name: []const u8) OreError!Plugin`
 Loads a plugin from the ORE OS into physical RAM using `ore_dlopen`. 
 
-#### `Plugin.bind(self: Plugin, comptime FuncSig: type, symbol: []const u8) OreError!ToCAbiPtr(FuncSig)`
-Extracts a function dynamically and casts it to the exact type instantly using `ore_dlsym`. Automatically handles WASM C-function pointer casting via Zig's `comptime`.
+#### `Plugin.bind(self: Plugin, comptime FuncSig: type, symbol: []const u8) OreError!*const FuncSig`
+Extracts a function dynamically and casts it to the exact type instantly using `ore_dlsym`. Automatically handles WASM C-function pointer casting.
 
 ---
 
@@ -84,8 +84,7 @@ pub fn main() !void {
     // 1. Load the Plugin into your physical RAM
     var plugin = try ore.Plugin.load("parser.wasi.so");
 
-    // 2. Bind the function securely using native Zig syntax
-    // The SDK forces C-ABI compatibility at compile-time automatically.
+    // 2. ZERO FRICTION BINDING! No pointers, no `callconv(.c)`, no typedefs!
     const parse = try plugin.bind(fn([*]const u8, u32, u32) u32, "count_error_flags");
 
     // 3. Execute
@@ -95,6 +94,32 @@ pub fn main() !void {
     std.debug.print("Errors found: {}\n", .{errors});
 }
 ```
+
+---
+
+## ORE FFI Rule of Thumb: Strict 32/64-bit ABI
+
+For developers building raw, high-performance WebAssembly plugins, passing smaller data types as 32-bit integers across the FFI (Foreign Function Interface) boundary is an industry-standard best practice.
+
+To prevent `call_indirect` signature mismatches and ensure zero-overhead execution, ORE rejects bloated wrapper code (like the Component Model `.wit` files). Instead, we stick to the raw C-ABI, offering bare-metal performance.
+
+**The Rule**: When passing arguments between the Host and the Plugin via the C-ABI, strictly use `u32`, `i32`, `f32`, or `f64`. WebAssembly does not natively support 8-bit or 16-bit function arguments on the call stack. 
+
+*If you need to pass a single byte (like a `u8` flag), cast it to a `u32` before crossing the OS boundary.* Pointers (which are just 32-bit memory offsets in WASM32) map perfectly to this architecture.
+
+---
+
+## The WebAssembly Secret: Zero Friction Binding
+
+In native x86/ARM programming, calling conventions (`.c`, `.stdcall`, `.fastcall`) are critical because they dictate whether arguments go into CPU registers or onto the stack. Getting it wrong causes immediate crashes.
+
+**WebAssembly does not have calling conventions.**
+
+At the bytecode level, WASM only has types: `i32`, `i64`, `f32`, and `f64`. A pointer is just an `i32`. When Zig compiles a `callconv(.c)` function and a `callconv(.zig)` function that use primitive types or pointers, they compile down to the exact same WebAssembly signature (e.g., `(param i32 i32 i32) (result i32)`).
+
+Because the WASM runtime only checks the WASM signature, it literally does not know or care what calling convention Zig thinks it is using.
+
+**This is the magic of ORE's Zero Friction Binding**: The developer doesn't need to fight the Zig compiler, hack `@Type`, or clutter their code with `callconv(.c)`. You just pass the clean, idiomatic Zig function signature directly into `bind()`, and the SDK handles the pointer casts internally.
 
 ---
 

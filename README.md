@@ -6,15 +6,17 @@
 
 The official Zig SDK for the **[ORE (Open Runtime Environment) Kernel](https://github.com/Mahavishnu-K/ore-kernel)**.
 
-This SDK provides the systems-level abstractions for **True Memory Fusion** (`ore_sys`), allowing Zig Host Agents to dynamically load, link, and execute `.wasi.so` plugins at runtime with zero-copy overhead. 
+This SDK provides the systems-level abstractions for **True Memory Fusion** (`ore_sys`), allowing Zig Host Agents to dynamically load, link, execute, and unload `.wasi.so` plugins at runtime with zero-copy overhead.
 
 It heavily leverages Zig's `comptime` features to provide an elegant, type-safe API for interacting with raw WebAssembly imports behind the scenes.
 
 ## Features
 
 - **Zero-Copy Overhead**: True memory fusion execution model.
-- **Dynamic Loading**: Dynamically load, link, and execute WebAssembly plugins at runtime using `ore_dlopen` and `ore_dlsym`.
-- **Secure & Type-safe Binding**: Bind plugin functions securely using native Zig syntax.
+- **Dynamic Loading**: Load, link, and execute WebAssembly plugins at runtime using `ore_dlopen` and `ore_dlsym`.
+- **Zero-Friction Binding**: Bind plugin functions with plain, idiomatic Zig function types. No `callconv(.c)` needed.
+- **Deterministic Unloading**: Close plugins explicitly with `ore_dlclose`. The kernel poisons their function table slots.
+- **Zero-Allocation Error Inspection**: Read the kernel's last error message through `ore_dlerror` into a static buffer, with no allocator required.
 
 ---
 
@@ -39,9 +41,11 @@ pub fn build(b: *std.Build) void {
 
     const exe = b.addExecutable(.{
         .name = "my_agent",
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
     });
 
     // ADD THESE TWO LINES:
@@ -56,44 +60,79 @@ pub fn build(b: *std.Build) void {
 
 ## API Reference
 
-The SDK exports the `Plugin` struct and `OreError` for robust error handling when interacting with the ORE kernel.
+The `ore_sys` module exports the `Plugin` struct, the `OreError` error set, and the `lastError()` function.
 
 ### `OreError`
-- `error.PluginLoadFailed`: Returned when the `.wasi.so` file fails to load into physical RAM.
-- `error.SymbolNotFound`: Returned when the requested function signature cannot be found in the loaded plugin.
+- `error.PluginLoadFailed`: The `.wasi.so` file failed to load into physical RAM.
+- `error.SymbolNotFound`: The requested symbol was not found in the loaded plugin.
+- `error.PluginCloseFailed`: The kernel refused or failed to unload the plugin.
+
+When any of these is returned, call `lastError()` to get the kernel's explanation.
 
 ### `Plugin`
 
 #### `Plugin.load(plugin_name: []const u8) OreError!Plugin`
-Loads a plugin from the ORE OS into physical RAM using `ore_dlopen`. 
+Loads a plugin from the ORE OS into physical RAM using `ore_dlopen`.
 
 #### `Plugin.bind(self: Plugin, comptime FuncSig: type, symbol: []const u8) OreError!*const FuncSig`
-Extracts a function dynamically and casts it to the exact type instantly using `ore_dlsym`. Automatically handles WASM C-function pointer casting.
+Looks up `symbol` with `ore_dlsym` and returns it as a function pointer of type `*const FuncSig`. Pass a plain Zig function type such as `fn (u32) u32`. See [Zero Friction Binding](#the-webassembly-secret-zero-friction-binding) for why no calling convention is needed.
+
+#### `Plugin.close(self: *Plugin) OreError!void`
+Deterministically unloads the plugin using `ore_dlclose`. The kernel poisons the plugin's function table slots, so function pointers previously returned by `bind()` can no longer reach the unloaded code. Do not call them after closing. On success the handle is reset to `0`, which makes repeated calls to `close()` a safe no-op.
+
+### `lastError() ?[]const u8`
+Fetches the last error string emitted by the ORE kernel through `ore_dlerror`, then clears it. Returns `null` if there is no pending error.
+
+This function is zero-allocation. The returned slice points into a shared 512-byte static buffer and is only valid until the next call to `lastError()`. Copy it if you need to keep it.
 
 ---
 
 ## Usage (Host Agent)
 
-Here is a simple example of how to use the SDK to load and execute a plugin.
+Here is a complete example: load a plugin, bind a function, run it, and unload the plugin.
 
 ```zig
 const std = @import("std");
 const ore = @import("ore_sys");
 
 pub fn main() !void {
-    // 1. Load the Plugin into your physical RAM
-    var plugin = try ore.Plugin.load("parser.wasi.so");
+    // 1. Load the plugin into physical RAM
+    var plugin = ore.Plugin.load("parser.wasi.so") catch |err| {
+        std.debug.print("load failed: {s}\n", .{ore.lastError() orelse "unknown error"});
+        return err;
+    };
+    // 4. Deterministically unload when done
+    defer plugin.close() catch {
+        std.debug.print("close failed: {s}\n", .{ore.lastError() orelse "unknown error"});
+    };
 
     // 2. ZERO FRICTION BINDING! No pointers, no `callconv(.c)`, no typedefs!
-    const parse = try plugin.bind(fn([*]const u8, u32, u32) u32, "count_error_flags");
+    const parse = try plugin.bind(fn ([*]const u8, u32, u32) u32, "count_error_flags");
 
     // 3. Execute
     const data = [_]u8{ 0x00, 0xFF, 0x01 };
     const errors = parse(&data, data.len, 0xFF);
-    
+
     std.debug.print("Errors found: {}\n", .{errors});
 }
 ```
+
+> `close()` takes `*Plugin`, so declare the plugin with `var`, not `const`.
+
+---
+
+## Kernel Imports
+
+Under the hood, `ore_sys` declares four raw WebAssembly imports that the ORE kernel provides to the host module:
+
+| Import        | Signature                          | Returns                                         |
+| ------------- | ---------------------------------- | ----------------------------------------------- |
+| `ore_dlopen`  | `(name_ptr, name_len) i32`         | Plugin handle (`> 0`), or `<= 0` on failure     |
+| `ore_dlsym`   | `(handle, sym_ptr, sym_len) i32`   | Function table index (`> 0`), or `<= 0`         |
+| `ore_dlclose` | `(handle) i32`                     | `0` on success, non-zero on failure             |
+| `ore_dlerror` | `(buf_ptr, buf_len) i32`           | Bytes written into `buf` (`<= 0` means no error) |
+
+You should never need to call these directly. The `Plugin` API and `lastError()` wrap them.
 
 ---
 
